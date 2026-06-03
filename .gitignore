@@ -1,0 +1,13 @@
+.env
+outputs/
+.pytest-tmp/
+.pytest_cache/
+pytest-cache-files*/
+__pycache__/
+*.py[cod]
+*.pyo
+*.tar
+*.tar.gz
+*.zip
+.DS_Store
+Thumbs.db

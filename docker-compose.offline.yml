@@ -1,0 +1,24 @@
+services:
+  bid-document-service:
+    image: bid-document-service:1.0.0
+    container_name: bid-document-service
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8010}:8010"
+    environment:
+      APP_ENV: production
+      DOCUMENT_SERVICE_API_KEY: ${DOCUMENT_SERVICE_API_KEY:?set DOCUMENT_SERVICE_API_KEY in .env}
+      OUTPUT_ROOT: /app/outputs
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      OUTPUT_RETENTION_HOURS: ${OUTPUT_RETENTION_HOURS:-168}
+      DOCUMENT_SERVICE_DOWNLOAD_SECRET: ${DOCUMENT_SERVICE_DOWNLOAD_SECRET:-}
+      PUBLIC_DOWNLOAD_TTL_SECONDS: ${PUBLIC_DOWNLOAD_TTL_SECONDS:-86400}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ./outputs:/app/outputs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

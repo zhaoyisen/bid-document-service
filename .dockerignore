@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+pytest-cache-files*/
+outputs/
+*.tar
+*.tar.gz
+*.zip
+.env
+tests/
+scripts/
