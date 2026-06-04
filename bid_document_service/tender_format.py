@@ -390,6 +390,16 @@ def extract_tender_format_file(source_docx: Path, project_name: str | None = Non
             file_response(job_id, report_path, "markdown"),
         ],
         warnings=warnings,
+        metadata={
+            "format_start_index": start_idx,
+            "format_end_index": end_idx,
+            "section_count": len(sections),
+            "table_count": len(tables),
+            "field_count": len(fields),
+            "sections": sections[:80],
+            "tables": tables[:80],
+            "fields": fields[:120],
+        },
     )
 
 
@@ -863,4 +873,11 @@ def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateRespons
             file_response(job_id, report, "markdown"),
         ],
         warnings=warnings,
+        metadata={
+            "section_count": len(req.sections),
+            "table_fill_count": len(req.table_fills),
+            "response_matrix_count": len(req.response_matrix),
+            "material_gap_count": len(req.material_gaps),
+            "checklist_count": len(req.checklist),
+        },
     )

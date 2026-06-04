@@ -28,6 +28,7 @@ class GenerateResponse(BaseModel):
     job_id: str
     files: list[GeneratedFile]
     warnings: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TableFillSpec(BaseModel):
