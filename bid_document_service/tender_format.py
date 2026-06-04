@@ -509,6 +509,7 @@ def fill_fields(doc: Document, fields: dict[str, Any]) -> list[str]:
             continue
         if val and key not in doc_text:
             warnings.append(f"未在模板中找到可直接填充的字段：{key}")
+    fill_template_phrases(doc, normalized)
     return warnings
 
 
@@ -523,6 +524,25 @@ def insert_paragraph_after(paragraph: Paragraph, text: str, style: str | None = 
         except Exception:
             pass
     return new_para
+
+
+def insert_paragraph_before(paragraph: Paragraph, text: str, style: str | None = None) -> Paragraph:
+    new_p = OxmlElement("w:p")
+    paragraph._p.addprevious(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    new_para.text = sanitize_generated_text(text)
+    if style:
+        try:
+            new_para.style = style
+        except Exception:
+            pass
+    return new_para
+
+
+def delete_paragraph(paragraph: Paragraph) -> None:
+    element = paragraph._element
+    element.getparent().remove(element)
+    paragraph._p = paragraph._element = None
 
 
 def add_paragraph_safe(doc: Document, text: str, style: str | None = None) -> Paragraph:
@@ -592,6 +612,94 @@ def extract_json_payload(text: str) -> Any | None:
         except Exception:
             continue
     return None
+
+
+def is_format_root_heading(text: str) -> bool:
+    compact = compact_text(text)
+    return bool(re.match(r"^第[一二三四五六七八九十百千万0-9]+[部分章节篇].{0,12}(响应文件格式|投标文件格式|应答文件格式)", compact))
+
+
+def top_level_response_headings(doc: Document) -> list[str]:
+    headings = []
+    for paragraph in doc.paragraphs:
+        text = paragraph_text(paragraph)
+        if not text or is_format_root_heading(text):
+            continue
+        compact = compact_text(text)
+        if re.match(r"^[一二三四五六七八九十百千万]+、", compact):
+            headings.append(text)
+        if len(headings) >= 18:
+            break
+    return headings
+
+
+def add_response_front_matter(doc: Document, fields: dict[str, Any]) -> None:
+    if not doc.paragraphs:
+        return
+    normalized = expand_field_aliases(fields)
+    project = normalized.get("项目名称", "")
+    project_code = normalized.get("项目编号", "")
+    bidder = normalized.get("供应商名称") or normalized.get("投标人名称") or normalized.get("投标人") or ""
+    headings = top_level_response_headings(doc)
+
+    for paragraph in list(doc.paragraphs[:5]):
+        if is_format_root_heading(paragraph_text(paragraph)):
+            delete_paragraph(paragraph)
+            break
+    if not doc.paragraphs:
+        return
+    first = doc.paragraphs[0]
+    lines = [
+        "正本/副本",
+        "",
+        "响 应 文 件",
+        "",
+        f"项目名称：{project}",
+        f"项目编号：{project_code}",
+        f"参与磋商供应商名称：{bidder}",
+        "",
+        "日期：        年    月    日",
+        "",
+        "目 录",
+        *headings,
+        "",
+    ]
+    for line in lines:
+        para = insert_paragraph_before(first, line)
+        if line in {"正本/副本", "响 应 文 件", "目 录"}:
+            try:
+                para.alignment = 1
+            except Exception:
+                pass
+
+
+def fill_template_phrases(doc: Document, fields: dict[str, Any]) -> None:
+    normalized = expand_field_aliases(fields)
+    project = normalized.get("项目名称", "")
+    project_code = normalized.get("项目编号", "")
+    bidder = normalized.get("供应商名称") or normalized.get("投标人名称") or normalized.get("投标人") or ""
+    guarantee = (
+        normalized.get("磋商保证金")
+        or normalized.get("保证金金额")
+        or normalized.get("保证金")
+        or normalized.get("投标保证金")
+    )
+    for paragraph in iter_all_paragraphs(doc):
+        text = paragraph.text
+        updated = text
+        if project:
+            updated = re.sub(r"“\s*”(\s*采购文件)", f"“{project}”\\1", updated)
+            updated = re.sub(r"“\s*”(\s*项目)", f"“{project}”\\1", updated)
+        if project_code:
+            updated = re.sub(r"（\s*项目编号\s*）", f"（项目编号：{project_code}）", updated)
+            updated = re.sub(r"\(\s*项目编号\s*\)", f"（项目编号：{project_code}）", updated)
+        if bidder:
+            updated = re.sub(r"（\s*(参与磋商供应商的名称|参与磋商供应商名称|供应商名称|投标人名称|投标人)\s*）", bidder, updated)
+            updated = re.sub(r"\(\s*(参与磋商供应商的名称|参与磋商供应商名称|供应商名称|投标人名称|投标人)\s*\)", bidder, updated)
+        if guarantee:
+            updated = re.sub(r"人民币\s*元（大写：\s*）", f"人民币{guarantee}元（大写：        ）", updated)
+        if updated != text:
+            paragraph.text = updated
 
 
 def section_from_item(item: Any, idx: int) -> dict[str, Any] | None:
@@ -779,6 +887,50 @@ def delete_row(table, row_idx: int) -> None:
     table._tbl.remove(row._tr)
 
 
+def value_for_header(row_data: dict[str, Any], header: str) -> str:
+    candidates = [header, header.replace(" ", ""), header.split("\n")[0]]
+    for key in candidates:
+        if key in row_data:
+            return sanitize_generated_text(row_data[key])
+    for key, val in row_data.items():
+        if key in header or header in key:
+            return sanitize_generated_text(val)
+    return ""
+
+
+def row_number(row_data: dict[str, Any], fallback: int) -> str:
+    raw = value_for_header(row_data, "序号") or value_for_header(row_data, "编号") or str(fallback)
+    match = re.search(r"\d+", raw)
+    return match.group(0) if match else raw.strip()
+
+
+def update_existing_table_rows(table, rows: list[dict[str, Any]], headers: list[str]) -> None:
+    existing_by_no: dict[str, int] = {}
+    for idx in range(1, len(table.rows)):
+        cells = table.rows[idx].cells
+        if not cells:
+            continue
+        number = re.search(r"\d+", table_text(cells[0]).strip())
+        if number:
+            existing_by_no.setdefault(number.group(0), idx)
+
+    for offset, row_data in enumerate(rows, 1):
+        no = row_number(row_data, offset)
+        row_idx = existing_by_no.get(no)
+        if row_idx is None and offset < len(table.rows):
+            row_idx = offset
+        if row_idx is None:
+            row = table.add_row()
+        else:
+            row = table.rows[row_idx]
+        for idx, header in enumerate(headers):
+            if idx >= len(row.cells):
+                break
+            cell_value = value_for_header(row_data, header)
+            if cell_value:
+                set_cell(row.cells[idx], cell_value)
+
+
 def fill_table_rows(table, rows: list[dict[str, Any]], mode: str = "replace_data_rows") -> None:
     if not rows:
         return
@@ -792,23 +944,15 @@ def fill_table_rows(table, rows: list[dict[str, Any]], mode: str = "replace_data
     if mode == "replace_data_rows" and len(table.rows) > 1:
         for idx in range(len(table.rows) - 1, 0, -1):
             delete_row(table, idx)
+    if mode == "update_existing_rows":
+        update_existing_table_rows(table, rows, headers)
+        return
     for row_data in rows:
         row = table.add_row()
         for idx, header in enumerate(headers):
             if idx >= len(row.cells):
                 break
-            candidates = [header, header.replace(" ", ""), header.split("\n")[0]]
-            cell_value = ""
-            for key in candidates:
-                if key in row_data:
-                    cell_value = row_data[key]
-                    break
-            if cell_value == "":
-                # 兼容常见表头别名
-                for key, val in row_data.items():
-                    if key in header or header in key:
-                        cell_value = val
-                        break
+            cell_value = value_for_header(row_data, header)
             set_cell(row.cells[idx], cell_value)
 
 
@@ -844,6 +988,7 @@ def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateRespons
         fields.setdefault("投标人名称", req.bidder_name)
         fields.setdefault("投标人", req.bidder_name)
 
+    add_response_front_matter(doc, fields)
     warnings = fill_fields(doc, fields)
     warnings.extend(fill_tables(doc, req.table_fills))
     warnings.extend(insert_sections(doc, req.sections))

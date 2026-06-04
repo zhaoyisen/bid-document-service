@@ -35,7 +35,7 @@ class TableFillSpec(BaseModel):
     table_index: int | None = Field(None, description="表格序号，从1开始")
     match_headers: list[str] = Field(default_factory=list, description="用于匹配表格的表头关键词")
     rows: list[dict[str, Any]] = Field(default_factory=list, description="需要填充的数据行")
-    mode: str = Field("replace_data_rows", description="replace_data_rows或append")
+    mode: str = Field("replace_data_rows", description="replace_data_rows、append或update_existing_rows")
 
 
 class TenderFormatFillRequest(BaseModel):

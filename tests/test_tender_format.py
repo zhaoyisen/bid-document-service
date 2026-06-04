@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from docx import Document
 
-from bid_document_service.tender_format import element_text, fill_fields, find_format_range, insert_sections
+from bid_document_service.tender_format import (
+    add_response_front_matter,
+    element_text,
+    fill_fields,
+    fill_table_rows,
+    find_format_range,
+    insert_sections,
+)
 
 
 def test_find_format_range_skips_table_of_contents_entry():
@@ -86,3 +93,54 @@ def test_fill_fields_populates_bidder_aliases_in_text_and_table_cells():
     assert "参与磋商供应商名称：示例科技有限公司" in doc.paragraphs[0].text
     assert table.rows[0].cells[1].text == "示例科技有限公司"
     assert not warnings
+
+
+def test_front_matter_removes_format_heading_and_fills_project_phrases():
+    doc = Document()
+    doc.add_paragraph("第三部分 响应文件格式")
+    doc.add_paragraph("一、报价表")
+    doc.add_paragraph("我方全面研究了“         ”采购文件（项目编号）后决定参加磋商。")
+    doc.add_paragraph("本授权声明：（供应商名称）授权代表为我方 “       ” 项目（项目编号）的合法代理人。")
+
+    fields = {
+        "项目名称": "成都银行统一加密平台升级项目",
+        "项目编号": "CYJC(X)-2025-0045",
+        "供应商名称": "示例科技有限公司",
+    }
+    add_response_front_matter(doc, fields)
+    fill_fields(doc, fields)
+    text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+
+    assert doc.paragraphs[0].text == "正本/副本"
+    assert "第三部分 响应文件格式" not in "\n".join(paragraph.text for paragraph in doc.paragraphs[:12])
+    assert "响 应 文 件" in text
+    assert "项目名称：成都银行统一加密平台升级项目" in text
+    assert "项目编号：CYJC(X)-2025-0045" in text
+    assert "“成都银行统一加密平台升级项目”采购文件（项目编号：CYJC(X)-2025-0045）" in text
+    assert "示例科技有限公司授权代表为我方 “成都银行统一加密平台升级项目” 项目（项目编号：CYJC(X)-2025-0045）" in text
+
+
+def test_update_existing_table_rows_preserves_row_count_and_fills_amounts():
+    doc = Document()
+    table = doc.add_table(rows=3, cols=6)
+    headers = ["序号", "名称", "内容", "价款（含税）", "税率", "备注"]
+    for idx, header in enumerate(headers):
+        table.rows[0].cells[idx].text = header
+    table.rows[1].cells[0].text = "1"
+    table.rows[1].cells[1].text = "产品一"
+    table.rows[2].cells[0].text = "2"
+    table.rows[2].cells[1].text = "产品二"
+
+    fill_table_rows(
+        table,
+        [
+            {"序号": "1", "价款（含税）": "10000", "税率": "6%"},
+            {"序号": "2", "价款（含税）": "20000", "税率": "6%"},
+        ],
+        "update_existing_rows",
+    )
+
+    assert len(table.rows) == 3
+    assert table.rows[1].cells[1].text == "产品一"
+    assert table.rows[1].cells[3].text == "10000"
+    assert table.rows[2].cells[3].text == "20000"
