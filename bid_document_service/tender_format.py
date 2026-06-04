@@ -33,6 +33,32 @@ START_KEYWORDS = [
     "附件格式",
 ]
 
+FORMAT_START_KEYWORDS = [
+    "响应文件格式",
+    "投标文件格式",
+    "应答文件格式",
+    "报价文件格式",
+    "附件格式",
+]
+
+COMPOSITION_START_KEYWORDS = [
+    "响应文件组成",
+    "投标文件组成",
+]
+
+START_EXPLANATION_KEYWORDS = [
+    "格式要求",
+    "有关资格证明文件要求",
+    "所有事项",
+    "格式条款",
+    "规范要求",
+    "应认真阅读",
+    "应包括",
+    "包括下列",
+    "按照采购文件要求",
+    "作出实质性响应",
+]
+
 END_KEYWORDS = [
     "采购需求",
     "采购项目内容及要求",
@@ -67,6 +93,8 @@ FIELD_LABELS = [
     "质保期",
 ]
 
+BIDDER_FIELD_ALIASES = ("供应商名称", "投标人名称", "投标人", "响应供应商名称", "参与磋商供应商名称")
+
 
 def local_name(element: Any) -> str:
     return element.tag.rsplit("}", 1)[-1]
@@ -80,8 +108,57 @@ def element_text(element: Any) -> str:
     return "".join(texts).strip()
 
 
-def is_start_text(text: str) -> bool:
+def start_keyword_present(text: str) -> bool:
     return any(keyword in text for keyword in START_KEYWORDS)
+
+
+def normalize_heading_candidate(text: str) -> str:
+    stripped = re.sub(r"\s+", " ", text.strip())
+    stripped = re.sub(r"\t\s*\d+\s*$", "", stripped)
+    stripped = re.sub(r"\.{2,}\s*\d+\s*$", "", stripped)
+    stripped = re.sub(r"\s{2,}\d+\s*$", "", stripped)
+    return stripped.strip()
+
+
+def compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", text.strip())
+
+
+def is_start_text(text: str) -> bool:
+    candidate = normalize_heading_candidate(text)
+    compact = compact_text(candidate)
+    if not start_keyword_present(compact):
+        return False
+    if re.match(r"^[（(]\d+[）)]", compact):
+        return False
+    if any(keyword in compact for keyword in START_EXPLANATION_KEYWORDS):
+        return False
+    if len(compact) > 45:
+        return False
+    if re.match(r"^第[一二三四五六七八九十百千万0-9]+[部分章节篇]", compact):
+        return True
+    if re.match(r"^[一二三四五六七八九十百千万0-9]+[、.．]", compact):
+        return True
+    if re.match(r"^附件[一二三四五六七八九十百千万0-9]*[:：、.．]?", compact):
+        return True
+    if compact in START_KEYWORDS:
+        return True
+    return any(compact.startswith(keyword) and len(compact) <= len(keyword) + 8 for keyword in START_KEYWORDS)
+
+
+def start_text_score(text: str) -> int:
+    if not is_start_text(text):
+        return 0
+    compact = compact_text(normalize_heading_candidate(text))
+    if any(keyword in compact for keyword in FORMAT_START_KEYWORDS):
+        score = 100
+    elif any(keyword in compact for keyword in COMPOSITION_START_KEYWORDS):
+        score = 40
+    else:
+        score = 60
+    if re.match(r"^第[一二三四五六七八九十百千万0-9]+[部分章节篇]", compact):
+        score += 20
+    return score
 
 
 def is_toc_line(text: str) -> bool:
@@ -112,20 +189,32 @@ def find_format_range(doc: Document) -> tuple[int, int, list[str]]:
     body = doc._body._element
     children = list(body)
     start_idx = None
+    start_candidates: list[tuple[int, int]] = []
     skipped_toc = False
+    skipped_explanation = False
     for idx, child in enumerate(children):
         text = element_text(child)
-        if is_start_text(text) and is_toc_line(text):
+        if start_keyword_present(text) and is_toc_line(text):
             skipped_toc = True
             continue
-        if is_start_text(text):
-            start_idx = idx
-            break
+        score = start_text_score(text)
+        if score:
+            start_candidates.append((score, idx))
+            continue
+        if start_keyword_present(text):
+            skipped_explanation = True
+    if start_candidates:
+        best_score = max(score for score, _ in start_candidates)
+        start_idx = min(idx for score, idx in start_candidates if score == best_score)
     if start_idx is None:
         warnings.append("未识别到“响应文件格式/投标文件格式”等章节，已使用全文作为项目级模板。")
         return 0, len(children), warnings
     if skipped_toc:
         warnings.append("已跳过目录页中的响应文件格式条目，使用正文中的响应文件格式章节作为模板起点。")
+    if skipped_explanation:
+        warnings.append("已跳过说明性条款中的响应文件格式关键词，使用正式章节标题作为模板起点。")
+    if any(idx < start_idx and score < best_score for score, idx in start_candidates):
+        warnings.append("已跳过供应商须知中的响应文件组成说明，优先使用正式响应文件格式章节。")
 
     end_idx = len(children)
     for idx in range(start_idx + 1, len(children)):
@@ -317,19 +406,81 @@ def iter_all_paragraphs(doc: Document):
 def fill_label_text(text: str, label: str, fill_value: str) -> str:
     if not fill_value:
         return text
-    patterns = [
+    seal_pattern = rf"({re.escape(label)}\s*[:：])\s*([（(][^）)]*[）)])\s*$"
+    match = re.search(seal_pattern, text)
+    if match:
+        return text[:match.start()] + f"{match.group(1)}{fill_value}    {match.group(2)}" + text[match.end():]
+    for pattern in [
         rf"({re.escape(label)}\s*[:：])\s*[_\s　/年月日.-]*$",
         rf"({re.escape(label)}\s*[:：])\s*[_\s　/.-]+",
-    ]
-    for pattern in patterns:
-        if re.search(pattern, text):
-            return re.sub(pattern, rf"\1{fill_value}", text)
+    ]:
+        match = re.search(pattern, text)
+        if match:
+            return text[:match.start()] + f"{match.group(1)}{fill_value}" + text[match.end():]
     return text
+
+
+def expand_field_aliases(fields: dict[str, Any]) -> dict[str, str]:
+    normalized = {str(k): "" if v is None else str(v) for k, v in fields.items()}
+    bidder = (
+        normalized.get("供应商名称")
+        or normalized.get("投标人名称")
+        or normalized.get("投标人")
+        or normalized.get("响应供应商名称")
+        or normalized.get("参与磋商供应商名称")
+    )
+    if bidder:
+        for alias in BIDDER_FIELD_ALIASES:
+            normalized.setdefault(alias, bidder)
+    return normalized
+
+
+def normalize_cell_label(text: str) -> str:
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[:：/（）()]", "", text)
+    return text.strip()
+
+
+def iter_distinct_row_cells(row):
+    seen = set()
+    for cell in row.cells:
+        key = id(cell._tc)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield cell
+
+
+def fill_table_label_cells(doc: Document, fields: dict[str, str]) -> int:
+    filled = 0
+    normalized_labels = {normalize_cell_label(key): val for key, val in fields.items() if val}
+    for table in doc.tables:
+        for row in table.rows:
+            cells = list(iter_distinct_row_cells(row))
+            for idx, cell in enumerate(cells):
+                label_text = normalize_cell_label(table_text(cell))
+                if not label_text:
+                    continue
+                matched_value = ""
+                for label, val in normalized_labels.items():
+                    if label_text == label or (label_text.startswith(label) and len(label_text) <= len(label) + 4):
+                        matched_value = val
+                        break
+                if not matched_value:
+                    continue
+                for target in cells[idx + 1:]:
+                    if table_text(target).strip():
+                        continue
+                    set_cell(target, matched_value)
+                    filled += 1
+                    break
+    return filled
 
 
 def fill_fields(doc: Document, fields: dict[str, Any]) -> list[str]:
     warnings = []
-    normalized = {str(k): "" if v is None else str(v) for k, v in fields.items()}
+    original_keys = {str(key) for key in fields}
+    normalized = expand_field_aliases(fields)
     for paragraph in iter_all_paragraphs(doc):
         original = paragraph.text
         updated = original
@@ -339,8 +490,14 @@ def fill_fields(doc: Document, fields: dict[str, Any]) -> list[str]:
             updated = fill_label_text(updated, key, val)
         if updated != original:
             paragraph.text = updated
+    fill_table_label_cells(doc, normalized)
+    doc_text = "\n".join(p.text for p in iter_all_paragraphs(doc))
     for key, val in normalized.items():
-        if val and not any(key in p.text for p in iter_all_paragraphs(doc)):
+        if key not in original_keys:
+            continue
+        if key in BIDDER_FIELD_ALIASES and any(alias in doc_text for alias in BIDDER_FIELD_ALIASES):
+            continue
+        if val and key not in doc_text:
             warnings.append(f"未在模板中找到可直接填充的字段：{key}")
     return warnings
 
@@ -386,6 +543,10 @@ def section_matches(text: str, section: dict[str, Any]) -> bool:
     return False
 
 
+def heading_style_name(level: int) -> str:
+    return f"Heading {max(1, min(4, level))}"
+
+
 def section_level(section: dict[str, Any], default: int = 2) -> int:
     raw = section.get("层级", section.get("level", default))
     try:
@@ -404,8 +565,135 @@ def section_text_lines(content: str) -> list[str]:
     return lines
 
 
+def extract_json_payload(text: str) -> Any | None:
+    clean = sanitize_generated_text(text)
+    clean = re.sub(r"^```(?:json|markdown)?\s*", "", clean.strip(), flags=re.IGNORECASE)
+    clean = re.sub(r"\s*```$", "", clean.strip())
+    if not clean:
+        return None
+    candidates = [clean]
+    start = clean.find("{")
+    end = clean.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(clean[start:end + 1])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return None
+
+
+def section_from_item(item: Any, idx: int) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    title = item.get("标题") or item.get("title")
+    content = item.get("正文") or item.get("content") or item.get("内容") or item.get("说明") or ""
+    points = item.get("编制要点") or item.get("writing_points") or item.get("要点") or []
+    if isinstance(points, str):
+        points = [points]
+    section = {
+        "章节编号": str(item.get("章节编号") or item.get("number") or item.get("编号") or f"10.{idx}"),
+        "层级": item.get("层级") or item.get("level") or 2,
+        "标题": str(title or "未命名章节"),
+        "正文": sanitize_generated_text(content),
+        "编制要点": [sanitize_generated_text(point) for point in points if sanitize_generated_text(point)],
+    }
+    for key in ("关联要求编号", "所需证明材料", "缺口编号", "evidence_needed", "gap_ids"):
+        if key in item:
+            section[key] = item[key]
+    return section
+
+
+def sections_from_structured_text(text: str) -> list[dict[str, Any]]:
+    parsed = extract_json_payload(text)
+    if isinstance(parsed, dict):
+        raw_sections = parsed.get("方案章节") or parsed.get("sections") or parsed.get("章节") or []
+    elif isinstance(parsed, list):
+        raw_sections = parsed
+    else:
+        raw_sections = []
+    sections = []
+    for idx, item in enumerate(raw_sections, 1):
+        section = section_from_item(item, idx)
+        if section:
+            sections.append(section)
+    return sections
+
+
+def normalize_sections_for_insert(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for idx, section in enumerate(sections, 1):
+        if not isinstance(section, dict):
+            parsed = sections_from_structured_text(str(section))
+            normalized.extend(parsed)
+            continue
+        raw_nested = section.get("方案章节") or section.get("sections") or section.get("章节")
+        if isinstance(raw_nested, list):
+            for nested_idx, item in enumerate(raw_nested, 1):
+                nested = section_from_item(item, nested_idx)
+                if nested:
+                    normalized.append(nested)
+            continue
+        content = value(section, "正文") or value(section, "content") or value(section, "内容")
+        parsed = sections_from_structured_text(content)
+        if parsed:
+            normalized.extend(parsed)
+            continue
+        title = value(section, "标题") or value(section, "title")
+        if not title and content:
+            parsed = sections_from_structured_text(content)
+            if parsed:
+                normalized.extend(parsed)
+                continue
+        normalized.append(section_from_item(section, idx) or section)
+    return normalized
+
+
+def section_heading_text(section: dict[str, Any]) -> str:
+    number = value(section, "章节编号") or value(section, "number")
+    title = value(section, "标题") or value(section, "title")
+    return f"{number} {title}".strip() or "未命名章节"
+
+
+def section_insert_lines(section: dict[str, Any], include_heading: bool) -> list[tuple[str, str | None]]:
+    lines: list[tuple[str, str | None]] = []
+    if include_heading:
+        lines.append((section_heading_text(section), heading_style_name(section_level(section))))
+    content = value(section, "正文") or value(section, "content")
+    for line in section_text_lines(content):
+        lines.append((line, None))
+    points = section.get("编制要点", section.get("writing_points", []))
+    if isinstance(points, str):
+        points = [points]
+    for point in points:
+        point_text = sanitize_generated_text(point)
+        if point_text:
+            lines.append((f"编制要点：{point_text}", "List Bullet"))
+    evidence = value(section, "所需证明材料") or value(section, "evidence_needed")
+    if evidence:
+        lines.append((f"所需证明材料：{evidence}", None))
+    gap = value(section, "缺口编号") or value(section, "gap_ids")
+    if gap:
+        lines.append((f"关联缺口：{gap}", None))
+    return lines
+
+
+def find_service_anchor(doc: Document) -> Paragraph | None:
+    candidates = []
+    for paragraph in doc.paragraphs:
+        text = paragraph_text(paragraph)
+        if not text:
+            continue
+        compact = compact_text(text)
+        if "服务方案" in compact or "技术方案" in compact or "实施方案" in compact:
+            candidates.append(paragraph)
+    return candidates[-1] if candidates else None
+
+
 def insert_sections(doc: Document, sections: list[dict[str, Any]]) -> list[str]:
     warnings = []
+    sections = normalize_sections_for_insert(sections)
     paragraphs = list(doc.paragraphs)
     unmatched = []
     for section in sections:
@@ -428,28 +716,25 @@ def insert_sections(doc: Document, sections: list[dict[str, Any]]) -> list[str]:
         if not lines:
             continue
         if matched:
-            current = matched
             for line in reversed(lines):
-                current = insert_paragraph_after(matched, line)
+                insert_paragraph_after(matched, line)
         else:
             unmatched.append(section)
     if unmatched:
-        add_heading_safe(doc, "自动补充方案内容", level=1)
-        for section in unmatched:
-            heading = f"{value(section, '章节编号') or value(section, 'number')} {value(section, '标题') or value(section, 'title')}".strip()
-            add_heading_safe(doc, heading or "未命名章节", level=section_level(section))
-            content = value(section, "正文") or value(section, "content")
-            if content:
-                for line in section_text_lines(content):
-                    add_paragraph_safe(doc, line)
-            points = section.get("编制要点", section.get("writing_points", []))
-            if isinstance(points, str):
-                points = [points]
-            for point in points:
-                point_text = sanitize_generated_text(point)
-                if point_text:
-                    add_paragraph_safe(doc, point_text, style="List Bullet")
-        warnings.append(f"{len(unmatched)}个章节未匹配到招标原格式标题，已追加到文末“自动补充方案内容”。")
+        service_anchor = find_service_anchor(doc)
+        if service_anchor:
+            insert_items: list[tuple[str, str | None]] = []
+            for section in unmatched:
+                insert_items.extend(section_insert_lines(section, include_heading=True))
+            for text, style in reversed(insert_items):
+                insert_paragraph_after(service_anchor, text, style=style)
+            warnings.append(f"{len(unmatched)}个章节未匹配到具体子标题，已插入到招标原格式的“服务方案/技术方案”章节下。")
+        else:
+            add_heading_safe(doc, "自动补充方案内容", level=1)
+            for section in unmatched:
+                for text, style in section_insert_lines(section, include_heading=True):
+                    add_paragraph_safe(doc, text, style=style)
+            warnings.append(f"{len(unmatched)}个章节未匹配到招标原格式标题，已追加到文末“自动补充方案内容”。")
     return warnings
 
 
