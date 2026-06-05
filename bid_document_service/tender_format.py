@@ -416,13 +416,14 @@ def iter_all_paragraphs(doc: Document):
 def fill_label_text(text: str, label: str, fill_value: str) -> str:
     if not fill_value:
         return text
-    seal_pattern = rf"({re.escape(label)}\s*[:：])\s*([（(][^）)]*[）)])\s*$"
+    label_pattern = rf"(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(label)}"
+    seal_pattern = rf"({label_pattern}\s*[:：])\s*([（(][^）)]*[）)])\s*$"
     match = re.search(seal_pattern, text)
     if match:
         return text[:match.start()] + f"{match.group(1)}{fill_value}    {match.group(2)}" + text[match.end():]
     for pattern in [
-        rf"({re.escape(label)}\s*[:：])\s*[_\s　/年月日.-]*$",
-        rf"({re.escape(label)}\s*[:：])\s*[_\s　/.-]+",
+        rf"({label_pattern}\s*[:：])\s*[_\s　/年月日.-]*$",
+        rf"({label_pattern}\s*[:：])\s*[_\s　/.-]+",
     ]:
         match = re.search(pattern, text)
         if match:
@@ -431,7 +432,7 @@ def fill_label_text(text: str, label: str, fill_value: str) -> str:
 
 
 def expand_field_aliases(fields: dict[str, Any]) -> dict[str, str]:
-    normalized = {str(k): "" if v is None else str(v) for k, v in fields.items()}
+    normalized = {str(k): "" if v is None else sanitize_generated_text(v) for k, v in fields.items()}
     bidder = (
         normalized.get("供应商名称")
         or normalized.get("投标人名称")
@@ -577,12 +578,23 @@ def heading_style_name(level: int) -> str:
     return f"Heading {max(1, min(4, level))}"
 
 
+def inferred_level_from_number(number: Any, default: int = 2) -> int:
+    text = str(number or "").strip()
+    if re.match(r"^\d+(?:\.\d+){1,3}$", text):
+        return max(2, min(4, text.count(".") + 1))
+    if re.match(r"^[一二三四五六七八九十百千万]+、", text):
+        return 1
+    return default
+
+
 def section_level(section: dict[str, Any], default: int = 2) -> int:
+    number = value(section, "章节编号") or value(section, "number") or value(section, "编号")
+    inferred = inferred_level_from_number(number, default)
     raw = section.get("层级", section.get("level", default))
     try:
-        return max(1, min(4, int(raw)))
+        return max(inferred, max(1, min(4, int(raw))))
     except Exception:
-        return default
+        return inferred
 
 
 def section_text_lines(content: str) -> list[str]:
@@ -593,6 +605,16 @@ def section_text_lines(content: str) -> list[str]:
             continue
         lines.append(line)
     return lines
+
+
+def style_for_inserted_line(text: str) -> str | None:
+    compact = text.strip()
+    match = re.match(r"^(\d+(?:\.\d+){1,3})\s+\S+", compact)
+    if match:
+        return heading_style_name(inferred_level_from_number(match.group(1), 2))
+    if re.match(r"^[一二三四五六七八九十百千万]+、\S+", compact):
+        return heading_style_name(1)
+    return None
 
 
 def extract_json_payload(text: str) -> Any | None:
@@ -673,6 +695,99 @@ def add_response_front_matter(doc: Document, fields: dict[str, Any]) -> None:
                 pass
 
 
+CN_DIGITS = "零壹贰叁肆伍陆柒捌玖"
+CN_UNITS = ["", "拾", "佰", "仟"]
+CN_SECTION_UNITS = ["", "万", "亿", "兆"]
+
+
+def normalize_money_text(text: Any) -> str:
+    clean = sanitize_generated_text(text)
+    clean = clean.replace(",", "")
+    match = re.search(r"[￥¥]\s*(\d+(?:\.\d+)?)", clean)
+    if match:
+        return match.group(1)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*元", clean)
+    if match:
+        return match.group(1)
+    match = re.search(r"金额\s*[:：]?\s*人民币?[一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖元整]+[（(][￥¥]\s*(\d+(?:\.\d+)?)[）)]", clean)
+    if match:
+        return match.group(1)
+    return clean[:80]
+
+
+def chinese_section(num: int) -> str:
+    result = ""
+    zero = False
+    unit_pos = 0
+    while num > 0:
+        digit = num % 10
+        if digit == 0:
+            if result and not zero:
+                result = CN_DIGITS[0] + result
+            zero = True
+        else:
+            result = CN_DIGITS[digit] + CN_UNITS[unit_pos] + result
+            zero = False
+        unit_pos += 1
+        num //= 10
+    return result.rstrip(CN_DIGITS[0])
+
+
+def amount_to_rmb_upper(amount: Any) -> str:
+    text = normalize_money_text(amount)
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return ""
+    number_text = match.group(0)
+    integer_text, _, decimal_text = number_text.partition(".")
+    integer = int(integer_text or "0")
+    if integer == 0:
+        integer_part = CN_DIGITS[0]
+    else:
+        parts = []
+        unit_idx = 0
+        need_zero = False
+        while integer > 0:
+            section = integer % 10000
+            if section == 0:
+                if parts:
+                    need_zero = True
+            else:
+                section_text = chinese_section(section)
+                if need_zero and parts and not parts[0].startswith(CN_DIGITS[0]):
+                    parts.insert(0, CN_DIGITS[0])
+                parts.insert(0, section_text + CN_SECTION_UNITS[unit_idx])
+                need_zero = section < 1000
+            integer //= 10000
+            unit_idx += 1
+        integer_part = "".join(parts).rstrip(CN_DIGITS[0])
+    decimal_text = (decimal_text + "00")[:2]
+    jiao = int(decimal_text[0])
+    fen = int(decimal_text[1])
+    if jiao == 0 and fen == 0:
+        decimal_part = "整"
+    else:
+        decimal_part = ""
+        if jiao:
+            decimal_part += CN_DIGITS[jiao] + "角"
+        if fen:
+            decimal_part += CN_DIGITS[fen] + "分"
+    return f"人民币{integer_part}元{decimal_part}"
+
+
+def money_display(amount: Any) -> str:
+    text = normalize_money_text(amount)
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return text
+    number_text = match.group(0)
+    integer_text, dot, decimal_text = number_text.partition(".")
+    integer = int(integer_text or "0")
+    if dot:
+        return f"{integer:,}.{(decimal_text + '00')[:2]}"
+    return f"{integer:,}"
+
+
 def fill_template_phrases(doc: Document, fields: dict[str, Any]) -> None:
     normalized = expand_field_aliases(fields)
     project = normalized.get("项目名称", "")
@@ -697,7 +812,13 @@ def fill_template_phrases(doc: Document, fields: dict[str, Any]) -> None:
             updated = re.sub(r"（\s*(参与磋商供应商的名称|参与磋商供应商名称|供应商名称|投标人名称|投标人)\s*）", bidder, updated)
             updated = re.sub(r"\(\s*(参与磋商供应商的名称|参与磋商供应商名称|供应商名称|投标人名称|投标人)\s*\)", bidder, updated)
         if guarantee:
-            updated = re.sub(r"人民币\s*元（大写：\s*）", f"人民币{guarantee}元（大写：        ）", updated)
+            amount = normalize_money_text(guarantee)
+            upper = amount_to_rmb_upper(amount)
+            display_amount = money_display(amount)
+            if upper:
+                updated = re.sub(r"人民币\s*元（大写：\s*）", f"人民币{display_amount}元（大写：{upper}）", updated)
+            else:
+                updated = re.sub(r"人民币\s*元（大写：\s*）", f"人民币{display_amount}元（大写：        ）", updated)
         if updated != text:
             paragraph.text = updated
 
@@ -710,9 +831,18 @@ def section_from_item(item: Any, idx: int) -> dict[str, Any] | None:
     points = item.get("编制要点") or item.get("writing_points") or item.get("要点") or []
     if isinstance(points, str):
         points = [points]
+    number = str(item.get("章节编号") or item.get("number") or item.get("编号") or f"10.{idx}")
+    explicit_level = item.get("层级") or item.get("level")
+    if explicit_level:
+        try:
+            level = max(inferred_level_from_number(number, 2), max(1, min(4, int(explicit_level))))
+        except Exception:
+            level = inferred_level_from_number(number, 2)
+    else:
+        level = inferred_level_from_number(number, 2)
     section = {
-        "章节编号": str(item.get("章节编号") or item.get("number") or item.get("编号") or f"10.{idx}"),
-        "层级": item.get("层级") or item.get("level") or 2,
+        "章节编号": number,
+        "层级": level,
         "标题": str(title or "未命名章节"),
         "正文": sanitize_generated_text(content),
         "编制要点": [sanitize_generated_text(point) for point in points if sanitize_generated_text(point)],
@@ -780,7 +910,7 @@ def section_insert_lines(section: dict[str, Any], include_heading: bool) -> list
         lines.append((section_heading_text(section), heading_style_name(section_level(section))))
     content = value(section, "正文") or value(section, "content")
     for line in section_text_lines(content):
-        lines.append((line, None))
+        lines.append((line, style_for_inserted_line(line)))
     points = section.get("编制要点", section.get("writing_points", []))
     if isinstance(points, str):
         points = [points]
@@ -824,18 +954,18 @@ def insert_sections(doc: Document, sections: list[dict[str, Any]]) -> list[str]:
             if section_matches(paragraph.text, section):
                 matched = paragraph
                 break
-        lines = []
+        lines: list[tuple[str, str | None]] = []
         if content:
-            lines.extend(section_text_lines(content))
+            lines.extend((line, style_for_inserted_line(line)) for line in section_text_lines(content))
         for point in points:
             point_text = sanitize_generated_text(point)
             if point_text:
-                lines.append(f"编制要点：{point_text}")
+                lines.append((f"编制要点：{point_text}", "List Bullet"))
         if not lines:
             continue
         if matched:
-            for line in reversed(lines):
-                insert_paragraph_after(matched, line)
+            for line, style in reversed(lines):
+                insert_paragraph_after(matched, line, style=style)
         else:
             unmatched.append(section)
     if unmatched:
@@ -968,6 +1098,23 @@ def fill_tables(doc: Document, table_fills) -> list[str]:
     return warnings
 
 
+def is_heading_paragraph(paragraph: Paragraph) -> bool:
+    try:
+        name = paragraph.style.name if paragraph.style else ""
+    except Exception:
+        name = ""
+    return bool(re.search(r"^(Heading|标题)\s*\d+", name, re.IGNORECASE))
+
+
+def cleanup_empty_headings(doc: Document) -> int:
+    removed = 0
+    for paragraph in list(doc.paragraphs):
+        if is_heading_paragraph(paragraph) and not paragraph_text(paragraph).strip():
+            delete_paragraph(paragraph)
+            removed += 1
+    return removed
+
+
 def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateResponse:
     template_dir = OUTPUT_ROOT / safe_name(req.template_job_id)
     template_name = req.template_file_name or "项目级响应模板.docx"
@@ -992,6 +1139,9 @@ def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateRespons
     warnings = fill_fields(doc, fields)
     warnings.extend(fill_tables(doc, req.table_fills))
     warnings.extend(insert_sections(doc, req.sections))
+    removed_empty_headings = cleanup_empty_headings(doc)
+    if removed_empty_headings:
+        warnings.append(f"已清理{removed_empty_headings}个空标题段落。")
 
     output_docx = output_dir / f"{safe_name(req.project_name)}_按招标原格式响应文件初稿.docx"
     doc.save(output_docx)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import re
 import time
 import uuid
@@ -71,6 +72,10 @@ def sanitize_generated_text(raw: Any) -> str:
     text = THINK_BLOCK_RE.sub("", text)
     text = re.sub(r"(?is)<think>.*", "", text)
     text = THINK_TAG_RE.sub("", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)</p\s*>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = html.unescape(text)
     return text.strip()
 
 

@@ -4,11 +4,14 @@ from docx import Document
 
 from bid_document_service.tender_format import (
     add_response_front_matter,
+    amount_to_rmb_upper,
+    cleanup_empty_headings,
     element_text,
     fill_fields,
     fill_table_rows,
     find_format_range,
     insert_sections,
+    normalize_money_text,
 )
 
 
@@ -118,6 +121,51 @@ def test_front_matter_removes_format_heading_and_fills_project_phrases():
     assert "项目编号：CYJC(X)-2025-0045" in text
     assert "“成都银行统一加密平台升级项目”采购文件（项目编号：CYJC(X)-2025-0045）" in text
     assert "示例科技有限公司授权代表为我方 “成都银行统一加密平台升级项目” 项目（项目编号：CYJC(X)-2025-0045）" in text
+
+
+def test_fill_fields_cleans_guarantee_html_and_adds_uppercase_amount():
+    doc = Document()
+    doc.add_paragraph("我方同意按照采购文件的要求，向贵单位交纳人民币    元（大写：        ）的磋商保证金。并承诺：下列任何情况发生时，我方将同意采购人没收我方参与磋商保证金：")
+    raw = "参与磋商保证金 | 金额：人民币壹万柒仟元整（￥17,000.00）<br>缴纳方式：银行转账"
+
+    fill_fields(doc, {"磋商保证金": raw})
+
+    assert "人民币17,000.00元（大写：人民币壹万柒仟元整）" in doc.paragraphs[0].text
+    assert "<br>" not in doc.paragraphs[0].text
+    assert "缴纳方式" not in doc.paragraphs[0].text
+    assert normalize_money_text(raw) == "17000.00"
+    assert amount_to_rmb_upper("850000.00") == "人民币捌拾伍万元整"
+
+
+def test_insert_sections_infers_heading_levels_from_numbered_lines():
+    doc = Document()
+    doc.add_paragraph("十、服务方案")
+    sections = [
+        {
+            "章节编号": "10.1",
+            "标题": "项目理解",
+            "正文": "10.1.1 项目背景\n围绕统一加密平台升级项目进行响应。",
+        }
+    ]
+
+    insert_sections(doc, sections)
+    styled = [(paragraph.text, paragraph.style.name) for paragraph in doc.paragraphs if paragraph.text.strip()]
+
+    assert ("10.1.1 项目背景", "Heading 3") in styled
+    assert any(text == "围绕统一加密平台升级项目进行响应。" for text, _ in styled)
+
+
+def test_cleanup_empty_headings_removes_blank_heading_paragraphs():
+    doc = Document()
+    doc.add_paragraph("十、服务方案")
+    blank = doc.add_paragraph("")
+    blank.style = "Heading 2"
+    doc.add_paragraph("正文")
+
+    removed = cleanup_empty_headings(doc)
+
+    assert removed == 1
+    assert all(not (paragraph.style.name == "Heading 2" and not paragraph.text.strip()) for paragraph in doc.paragraphs)
 
 
 def test_update_existing_table_rows_preserves_row_count_and_fills_amounts():
