@@ -7,6 +7,7 @@ from bid_document_service.tender_format import (
     amount_to_rmb_upper,
     cleanup_empty_headings,
     element_text,
+    ensure_service_sections,
     fill_fields,
     fill_table_rows,
     find_format_range,
@@ -153,6 +154,25 @@ def test_insert_sections_infers_heading_levels_from_numbered_lines():
 
     assert ("10.1.1 项目背景", "Heading 3") in styled
     assert any(text == "围绕统一加密平台升级项目进行响应。" for text, _ in styled)
+
+
+def test_ensure_service_sections_adds_three_level_fallback_when_missing_or_shallow():
+    sections, warnings = ensure_service_sections([], "测试项目", [{"招标要求原文": "需支持密钥迁移、双活和源代码交付。"}])
+
+    assert warnings
+    assert any(section["章节编号"] == "10.1.1" for section in sections)
+    assert any(section["章节编号"] == "10.2.4" for section in sections)
+    assert max(int(section["层级"]) for section in sections) >= 3
+
+    shallow, warnings = ensure_service_sections(
+        [{"章节编号": "10.1", "层级": 2, "标题": "项目理解", "正文": "二级章节正文"}],
+        "测试项目",
+        [],
+    )
+
+    assert any("3级目录" in warning for warning in warnings)
+    assert any(section["章节编号"] == "10.1.1" for section in shallow)
+    assert any(section["章节编号"] == "10.1" for section in shallow)
 
 
 def test_cleanup_empty_headings_removes_blank_heading_paragraphs():

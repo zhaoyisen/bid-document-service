@@ -904,6 +904,70 @@ def section_heading_text(section: dict[str, Any]) -> str:
     return f"{number} {title}".strip() or "未命名章节"
 
 
+def max_section_level(sections: list[dict[str, Any]]) -> int:
+    return max((section_level(section) for section in sections if isinstance(section, dict)), default=0)
+
+
+def fallback_service_sections(project_name: str, response_matrix: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    requirements = "\n".join(
+        value(row, "招标要求原文")
+        for row in (response_matrix or [])
+        if isinstance(row, dict) and value(row, "招标要求原文")
+    )
+    has_source = "源代码" in requirements or "源码" in requirements
+    has_dual_active = "双活" in requirements or "双中心" in requirements
+    has_key = "密钥" in requirements or "加密" in requirements
+    has_training = "培训" in requirements
+    project = project_name or "本项目"
+    sections = [
+        ("10.1", 2, "项目理解", f"围绕{project}的采购目标、业务连续性、密码安全和现有系统兼容要求，说明对项目背景、建设目标和实施边界的理解。"),
+        ("10.1.1", 3, "建设背景与必要性", "统一加密平台作为密码服务基础能力，应在保障存量业务稳定运行的前提下完成升级，支撑业务系统对密码验证、MAC 校验、报文加密和签名验签等能力的持续使用。"),
+        ("10.1.2", 3, "关键约束与风险识别", "重点识别接口不变、业务连续、数据和密钥安全、上线窗口、证明材料、授权边界和验收要求等约束，正式提交前需与响应矩阵和资料缺口表逐项核对。"),
+        ("10.2", 2, "总体技术方案", "从平台架构、功能能力、接口兼容、运行监控、安全审计和合规要求等方面组织技术响应。"),
+        ("10.2.1", 3, "总体架构设计", "采用分层、解耦、可扩展的架构思路组织统一加密平台能力，确保业务系统通过统一接口调用密码服务，降低升级对既有系统的影响。"),
+        ("10.2.2", 3, "密码服务能力设计", "围绕密钥管理、设备管理、密码运算服务、证书管理、接口服务、审计日志、监控告警和报表统计等能力展开响应。"),
+        ("10.2.3", 3, "接口兼容与联调方案", "对存量业务系统接口、调用协议、异常返回、并发性能和回归测试建立验证清单，确保升级后业务系统无需大规模改造。"),
+        ("10.3", 2, "项目实施方案", "按项目启动、调研设计、开发适配、测试联调、上线切换、试运行和验收移交组织实施过程。"),
+        ("10.3.1", 3, "实施阶段与里程碑", "结合采购文件要求倒排实施计划，明确每阶段工作内容、责任分工、输入资料、输出成果和评审节点。"),
+        ("10.3.2", 3, "项目组织与沟通机制", "建立项目经理负责制和例会、问题、风险、变更、文档归档机制，确保与采购人及相关系统建设方协同推进。"),
+        ("10.3.3", 3, "上线、应急与回退", "上线前完成备份、演练、验证、监控和应急联系人确认；上线异常时按预设回退路径恢复服务并保留处置记录。"),
+        ("10.4", 2, "测试验收与质量保证", "通过功能、性能、兼容性、安全、回归、联调和用户验收测试形成质量闭环。"),
+        ("10.4.1", 3, "测试验证方案", "编制测试方案、测试案例、测试数据、缺陷跟踪和回归验证记录，确保采购需求和评分点有可复核支撑。"),
+        ("10.4.2", 3, "验收资料与移交", "按招标要求准备部署文档、配置说明、接口文档、测试报告、培训材料、运维手册和验收记录。"),
+        ("10.5", 2, "培训与知识转移方案", "面向管理、运维、开发和使用人员组织培训，形成培训计划、培训课件、签到记录和答疑记录。"),
+        ("10.5.1", 3, "培训对象与内容", "培训内容覆盖平台功能、接口调用、日常运维、故障处理、监控告警、日志审计和安全注意事项。"),
+        ("10.6", 2, "运维与售后服务方案", "说明服务响应、问题处理、巡检、版本升级、补丁修复和服务报告机制，正式承诺以合同和授权材料为准。"),
+        ("10.6.1", 3, "服务响应与问题处理", "建立故障分级、响应时限、处理流程、升级机制和闭环记录，保障系统运行问题可追踪、可复盘。"),
+    ]
+    if has_key:
+        sections.append(("10.2.4", 3, "密钥同步与迁移控制", "密钥迁移和同步应先形成对象清单、业务映射、迁移策略、演练记录和回退条件，严格控制权限、审计和异常恢复。"))
+    if has_dual_active:
+        sections.append(("10.2.5", 3, "双活与高可用设计", "围绕双中心部署、负载均衡、故障切换、状态监控和容量扩展组织响应，确保关键密码服务具备持续服务能力。"))
+    if has_source:
+        sections.append(("10.7", 2, "知识产权、源码和第三方组件控制", "源代码、第三方授权和开源组件范围不得编造，正式提交前应由产品、法务和原厂材料共同确认。"))
+        sections.append(("10.7.1", 3, "源码交付与组件清单", "列明源码交付范围、第三方组件名称、版本、用途、许可证义务和替代路径，作为合同履行和验收资料的组成部分。"))
+    if not has_training:
+        sections.append(("10.5.2", 3, "培训交付资料", "培训交付包括培训计划、课件、操作手册、签到记录、问题答疑和培训总结。"))
+    return [
+        {"章节编号": number, "层级": level, "标题": title, "正文": body}
+        for number, level, title, body in sections
+    ]
+
+
+def ensure_service_sections(sections: list[dict[str, Any]], project_name: str, response_matrix: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings = []
+    normalized = normalize_sections_for_insert(sections)
+    if not normalized:
+        warnings.append("未收到专题方案章节，已根据响应矩阵生成服务方案兜底骨架。")
+        return fallback_service_sections(project_name, response_matrix), warnings
+    if max_section_level(normalized) < 3:
+        warnings.append("专题方案未达到3级目录，已补充服务方案3级兜底章节。")
+        fallback = fallback_service_sections(project_name, response_matrix)
+        existing_numbers = {value(section, "章节编号") for section in normalized if isinstance(section, dict)}
+        normalized.extend(section for section in fallback if value(section, "章节编号") not in existing_numbers)
+    return normalized, warnings
+
+
 def section_insert_lines(section: dict[str, Any], include_heading: bool) -> list[tuple[str, str | None]]:
     lines: list[tuple[str, str | None]] = []
     if include_heading:
@@ -1136,9 +1200,11 @@ def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateRespons
         fields.setdefault("投标人", req.bidder_name)
 
     add_response_front_matter(doc, fields)
-    warnings = fill_fields(doc, fields)
+    sections, section_warnings = ensure_service_sections(req.sections, req.project_name, req.response_matrix)
+    warnings = section_warnings
+    warnings.extend(fill_fields(doc, fields))
     warnings.extend(fill_tables(doc, req.table_fills))
-    warnings.extend(insert_sections(doc, req.sections))
+    warnings.extend(insert_sections(doc, sections))
     removed_empty_headings = cleanup_empty_headings(doc)
     if removed_empty_headings:
         warnings.append(f"已清理{removed_empty_headings}个空标题段落。")
@@ -1154,7 +1220,7 @@ def generate_from_tender_format(req: TenderFormatFillRequest) -> GenerateRespons
         metadata={},
         response_matrix=req.response_matrix,
         material_gaps=req.material_gaps,
-        sections=req.sections,
+        sections=sections,
         checklist=req.checklist,
     )
     xlsx = generate_xlsx(package_req, output_dir)
